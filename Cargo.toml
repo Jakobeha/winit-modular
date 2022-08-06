@@ -1,0 +1,23 @@
+[package]
+name = "winit-modular"
+version = "0.1.0"
+authors = ["jakobeha <jakobeha@fastmail.com>"]
+description = "use `winit` without relying on a single `EventLoop` on the main thread"
+repository = "https://github.com/jakobeha/winit-modular"
+license = "Apache-2.0"
+keywords = ["windowing"]
+categories = ["gui"]
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# winit is currently pinned at 0.26 until wgpu updates to a version which doesn't conflict
+winit = "0.26.1"
+crossbeam-channel = "0.5.6"
+
+[dev-dependencies]
+# Logging
+test-log = "0.2.11"
+env_logger = "0.9.0"
