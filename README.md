@@ -1,5 +1,8 @@
 # winit-modular: use `winit` without relying on a single `EventLoop` on the main thread
 
+Provides an API very similar to `winit` except the `EventLoop` type can be created on multiple threads, multiple event loops can exist simultaneously, you can poll for events or receive them asynchronously, and more.
+
+## The problem
 
 [`winit`](https://crates.io/winit) is the de-facto way to create windows and listen to system events in Rust. However the core struct [`EventLoop`](https://docs.rs/winit/latest/winit/event_loop/struct.EventLoop.html), which allows you to create windows and listen to events, has some annoying restrictions:
 
@@ -7,16 +10,93 @@
 - It must be created only once
 - When `EventLoop::run` ends, your application exits.
 
-which imply
+which imply more restrictions:
 
 - You can't run multiple event loops simultanously
 - You can't stop an event loop and later run another one
 - You can't have multiple dependencies which create event loops.
 
-This crate fixes these issues, sort of, by providing `winit_modular::run` and `EventLoopProxy`. `winit_modular::run` must be called once on the main thread, and it blocks the main thread, as it creates and runs the event loop. But allows you to use `EventLoopProxy`s. The API of `EventLoopProxy` is very similar to `EventLoop`, but provides these advantages:
+There is also the issue of [inversion of control](https://crates.io/crates/winit-main) which [winit-main](https://crates.io/crates/winit-main) explains and attempts to solve.
 
-- You can create multiples of these and even run them at the same time, on separate threads
-- You can create these on separate threads
-- You can stop these loops without exiting your entire application
+## The solution
 
-Note that there is a performance penalty, as `EventLoopProxy`s must communicate with the `EventLoop` across thread bounds, for every call or intercepted event. Modern hardware is generally fast enough that this should not be an issue, but this could be an issue on embedded hardware or if you are sending a particularly large number of calls or intercepting a particularly large number of events (i.e. more than `Render` events which are sent once per frame).
+This crate fixes `winit`'s lack of modularity, [*sort of*](#drawbacks). It provides `EventLoop`s which have a similar api to `winit::event_loop::EventLoop`, but:
+
+- Can exist and run simultaneously on separate threads or even the same thread (see [`run`](https://docs.rs/winit-modular/latest/winit_modular/struct.EventLoop.html#method.run))
+- Can run asynchronously (see [`run_async`](https://docs.rs/winit-modular/latest/winit_modular/struct.EventLoop.html#method.run_async))
+- Can be polled (see [`run_immediate`](https://docs.rs/winit-modular/latest/winit_modular/struct.EventLoop.html#method.run_immediate)), fixing the "inversion of control" issue
+- You can stop calls to any of these and drop the event loops without exiting your entire application.
+
+This works as these `EventLoop`s are actually proxies, which forward their calls and recieve events from the main event loop using asynchronous channels and atomics.
+
+## Drawbacks
+
+This doesn't completely alleviate `winit`'s issues and is not always drop-in replacement.
+
+Most importantly, *you must call `winit_modular::run` exactly once in your application, on the main thread, before using the event loops in this crate*. If you don't you will get a panic message explaining this. as `winit_modular::run` hijacks the main thread, it provides a callback to run the rest of your code on the background thread.
+
+Also the performance penalty from using multiple threads and sending messages across channels. The proxy event loops must communicate with the actual winit event loop across thread bounds, for every operation or intercepted event. That means, often once every frame refresh. Fortunately, modern hardware is generally fast enough and threading is good enough that even then it's a minor performance penalty. But on embedded systems, or if you are spawning a lot of proxy event loops simultaneously, it could be an issue.
+
+## Example (originally from [winit-main](https://crates.io/crates/winit-main))
+
+Without `winit_modular`:
+
+```rust
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
+
+fn main() {
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        if matches!(
+            event,
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                window_id,
+            } if window_id == window.id()
+        ) {
+            *control_flow = ControlFlow::Exit;
+        }
+    });
+}
+```
+
+With `winit-modular`:
+
+```rust
+use winit_modular::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop}
+};
+use pollster::block_on;
+
+fn main() {
+    winit_modular::run(|| block_on(async {
+        let event_loop = EventLoop::new().await;
+        
+        let window = event_loop
+            .create_window(|builder| builder)
+            .await
+            .unwrap();
+
+        event_loop.run_async(|event, control_flow| {
+            if matches!(
+                event,
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    window_id,
+                } if window_id == window.id()
+            ) {
+                *control_flow = ControlFlow::ExitApp;
+            }
+        }).await;
+    }));
+}
+```

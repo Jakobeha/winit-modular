@@ -15,7 +15,9 @@ crate-type = ["lib"]
 [dependencies]
 # winit is currently pinned at 0.26 until wgpu updates to a version which doesn't conflict
 winit = "0.26.1"
-crossbeam-channel = "0.5.6"
+flume = "0.10.14"
+crossbeam-utils = "0.8.11"
+pollster = "0.2.5"
 
 [dev-dependencies]
 # Logging
