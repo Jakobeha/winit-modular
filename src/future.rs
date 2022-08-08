@@ -1,20 +1,30 @@
-use std::fmt::{Display, Formatter};
 use std::task::{Context, Poll, Waker};
 use std::future::Future;
+use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
 use crossbeam_utils::atomic::AtomicCell;
 use crate::event_loop::EventLoop;
-use crate::messages::{ProxyRegisterBody, ProxyResponse};
+use crate::messages::{ProxyRegisterBody, ProxyRequest, ProxyResponse};
 
 pub struct FutEventLoop {
     pub(crate) body: Arc<AtomicCell<ProxyRegisterBody>>
 }
 
+#[must_use = "the response won't actually send until you await or poll"]
+#[repr(C)]
 pub struct FutResponse<'a, T> {
-    pub(crate) proxy: &'a EventLoop,
-    pub(crate) id: ResponseId,
-    pub(crate) convert: fn(ProxyResponse) -> T
+    response: Option<ProxyResponse>,
+    proxy: &'a EventLoop,
+    message: Option<ProxyRequest>,
+    convert: fn(ProxyResponse) -> T,
+    // This is pinned because there is a pointer to response in PendingRequest
+    _p: PhantomPinned
+}
+
+pub(crate) struct PendingRequest {
+    waker: Option<Waker>,
+    response_ptr: *mut Option<ProxyResponse>
 }
 
 impl Future for FutEventLoop {
@@ -32,60 +42,55 @@ impl Future for FutEventLoop {
     }
 }
 
+impl<'a, T> FutResponse<'a, T> {
+    pub(crate) fn new(
+        proxy: &'a EventLoop,
+        message: ProxyRequest,
+        convert: fn(ProxyResponse) -> T
+    ) -> Self {
+        FutResponse {
+            response: None,
+            proxy,
+            message: Some(message),
+            convert,
+            _p: PhantomPinned
+        }
+    }
+}
+
 impl<'a, T> Future for FutResponse<'a, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        this.proxy.poll(this.id, cx).map(this.convert)
-    }
-}
-
-pub(crate) struct PendingResponse {
-    pub(crate) id: ResponseId,
-    waker: Option<Waker>
-}
-
-pub(crate) struct ReadyResponse {
-    pub(crate) id: ResponseId,
-    pub(crate) response: ProxyResponse,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResponseId(pub(crate) usize);
-
-impl PendingResponse {
-    pub(crate) fn new(id: ResponseId) -> Self {
-        PendingResponse {
-            id,
-            waker: None
-        }
-    }
-
-    pub(crate) fn wake(mut self, response: ProxyResponse) -> ReadyResponse {
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-        ReadyResponse::new(self.id, response)
-    }
-
-    pub(crate) fn poll(&mut self, cx: &mut Context<'_>) {
-        assert!(self.waker.is_none(), "redundantly polled");
-        self.waker = Some(cx.waker().clone());
-    }
-}
-
-impl ReadyResponse {
-    fn new(id: ResponseId, response: ProxyResponse) -> Self {
-        ReadyResponse {
-            id,
-            response
+        // SAFETY
+        let this = unsafe { self.get_unchecked_mut() };
+        if let Some(response) = this.response.take() {
+            debug_assert!(this.message.is_none());
+            Poll::Ready((this.convert)(response))
+        } else {
+            let message = this.message.take().expect("redundantly polled");
+            match Pin::new(&mut Box::pin(this.proxy.actually_send(message, cx.waker().clone(), &mut this.response as *mut _))).poll(cx) {
+                Poll::Ready(()) => {
+                    let response = this.response.take().expect("FutResponse poll instantly succeeded but there is no response");
+                    Poll::Ready((this.convert)(response))
+                }
+                Poll::Pending => Poll::Pending
+            }
         }
     }
 }
 
-impl Display for ResponseId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}", self.0)
+impl PendingRequest {
+    pub(crate) fn new(waker: Waker, response_ptr: *mut Option<ProxyResponse>) -> Self {
+        PendingRequest {
+            waker: Some(waker),
+            response_ptr
+        }
+    }
+
+    pub(crate) fn resolve(mut self, response: ProxyResponse) {
+        unsafe { *self.response_ptr = Some(response); }
+        let waker = self.waker.take().expect("redundantly resolved");
+        waker.wake();
     }
 }

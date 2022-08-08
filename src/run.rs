@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::spawn;
 use winit::window::WindowBuilder;
 use crossbeam_utils::atomic::AtomicCell;
@@ -20,6 +21,7 @@ pub fn run(rest: impl FnOnce() + Send + 'static) -> ! {
     // let mut next_proxy_id = 1;
     let mut proxy_channels = Vec::new();
 
+    EXIT_FLAG.with(|exit_flag| exit_flag.store(1, Ordering::Release));
     spawn(rest);
 
     winit::event_loop::EventLoop::<UserEvent>::with_user_event().run(move |event, window_target, control_flow| {
@@ -124,5 +126,23 @@ pub fn run(rest: impl FnOnce() + Send + 'static) -> ! {
             SharedControlFlow::WaitUntil(instant) => winit::event_loop::ControlFlow::WaitUntil(instant),
             SharedControlFlow::ExitApp => winit::event_loop::ControlFlow::Exit,
         };
+
+        if EXIT_FLAG.with(|exit_flag| exit_flag.load(Ordering::Acquire)) == 2 {
+            *control_flow = winit::event_loop::ControlFlow::Exit;
+        }
     })
+}
+
+/// Forces the program to exit via winit's event loop.
+///
+/// If [run] is not called before this it exits normally.
+pub fn exit() {
+    if EXIT_FLAG.with(|exit_flag| exit_flag.load(Ordering::Acquire)) == 0 {
+        std::process::exit(0);
+    }
+    EXIT_FLAG.with(|exit_flag| exit_flag.store(2, Ordering::Release));
+}
+
+thread_local! {
+    static EXIT_FLAG: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
 }

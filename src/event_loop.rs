@@ -2,15 +2,15 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use crossbeam_utils::atomic::AtomicCell;
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use winit::window::{Window, WindowBuilder};
 use winit::error::OsError;
-use pollster::block_on;
-use std::task::{Context, Poll};
+use futures::executor::block_on;
+use std::task::Waker;
 use std::time::Instant;
 use crate::event::Event;
-use crate::future::{ReadyResponse, FutResponse, PendingResponse, FutEventLoop, ResponseId};
+use crate::future::{FutResponse, PendingRequest, FutEventLoop};
 use crate::messages::{ProxyRegister, ProxyRegisterBody, ProxyRegisterInfo, ProxyRequest, ProxyResponse, REGISTER_PROXY};
 
 /// Similar API to [winit::EventLoop], however
@@ -26,9 +26,15 @@ pub struct EventLoop {
     control_flow: Arc<AtomicCell<ControlFlow>>,
     send: Sender<ProxyRequest>,
     recv: Receiver<ProxyResponse>,
-    awaiting_responses: RefCell<VecDeque<PendingResponse>>,
-    awaited_responses: RefCell<Vec<ReadyResponse>>,
-    next_awaiting_response_id: Cell<usize>
+    pending_requests: RefCell<VecDeque<PendingRequest>>,
+    locally_pending_events: RefCell<Vec<Event>>,
+    is_receiving_events: Cell<bool>
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventIs {
+    Pending,
+    New
 }
 
 impl EventLoop {
@@ -59,9 +65,9 @@ impl EventLoop {
             control_flow: info.control_flow,
             send: info.send,
             recv: info.recv,
-            awaiting_responses: RefCell::new(VecDeque::new()),
-            awaited_responses: RefCell::new(Vec::new()),
-            next_awaiting_response_id: Cell::new(0)
+            pending_requests: RefCell::new(VecDeque::new()),
+            locally_pending_events: RefCell::new(Vec::new()),
+            is_receiving_events: Cell::new(false)
         }
     }
 
@@ -77,33 +83,75 @@ impl EventLoop {
         })
     }
 
-    fn send<T>(&self, message: ProxyRequest, convert_response: fn(ProxyResponse) -> T) -> FutResponse<'_, T> {
-        match self.send.try_send(message) {
-            Ok(()) => (),
-            Err(TrySendError::Full(_)) => unreachable!("proxy event loop channel (unbounded) is full?"),
-            Err(TrySendError::Disconnected(_)) => panic!("main event loop crashed")
-        };
+    /// Receives new *and buffered* events and responses from the main loop, blocking waiting for new responses,
+    /// until the event handler explicitly exits.
+    ///
+    /// The third argument to `event_handler` is whether the event is buffered (i.e. sent before this was called) or new.
+    pub fn run(&self, event_handler: impl FnMut(Event, &mut ControlFlow, EventIs)) {
+        block_on(self.run_async(event_handler))
+    }
 
-        let id = self.next_awaiting_response_id.get();
-        self.next_awaiting_response_id.set(id + 1);
-        let id = ResponseId(id);
+    /// Receives new *and buffered* events and responses from the main loop, blocking waiting for new responses,
+    /// until the event handler explicitly exits.
+    ///
+    /// The third argument to `event_handler` is whether the event is buffered (i.e. sent before this was called) or new.
+    pub async fn run_async(&self, mut event_handler: impl FnMut(Event, &mut ControlFlow, EventIs)) {
+        assert!(!self.is_receiving_events.get(), "already running");
+        self.is_receiving_events.set(true);
+        // Handle locally pending events
+        for event in self.locally_pending_events.borrow_mut().drain(..) {
+            match self.handle_event(event, |event, control_flow| {
+                event_handler(event, control_flow, EventIs::New)
+            }) {
+                std::ops::ControlFlow::Break(()) => {
+                    // Exit early
+                    self.is_receiving_events.set(false);
+                    break
+                },
+                std::ops::ControlFlow::Continue(()) => ()
+            }
+        }
+        // Handle remote pending and new events
+        self._run_async(event_handler).await;
+        self.is_receiving_events.set(false);
+    }
 
-        let mut awaiting_responses = self.awaiting_responses.borrow_mut();
-        awaiting_responses.push_back(PendingResponse::new(id));
-
-        FutResponse {
-            proxy: self,
-            id,
-            convert: convert_response
+    async fn run_only_responses(&self) {
+        if !self.is_receiving_events.get() {
+            self._run_async(|_, _, _| unreachable!("called event handler but we are not receiving events")).await;
         }
     }
 
-    /// Receives all pending events and responses from the main loop, not blocking.
+    /// Receives new *and buffered* events and responses from the main loop, blocking waiting for new responses,
+    /// until the event handler explicitly exits.
+    ///
+    /// The third argument to `event_handler` is whether the event is buffered (i.e. sent before this was called) or new.
+    async fn _run_async(&self, mut event_handler: impl FnMut(Event, &mut ControlFlow, EventIs)) {
+        // Handle pending events
+        self.run_immediate(|event, control_flow| {
+            event_handler(event, control_flow, EventIs::Pending);
+        });
+
+        // Handle new events
+        loop {
+            let response = match self.recv.recv_async().await {
+                Ok(response) => response,
+                Err(_) => panic!("main event loop crashed")
+            };
+
+            match self.handle_response(response, |event, control_flow| {
+                event_handler(event, control_flow, EventIs::New)
+            }) {
+                std::ops::ControlFlow::Break(()) => break,
+                std::ops::ControlFlow::Continue(()) => ()
+            }
+        }
+    }
+
+    /// Receives all buffered events and responses from the main loop, not blocking for new events.
     ///
     /// You can set [ControlFlow] to exit locally or exit the app, but [ControlFlow::Wait] and [ControlFlow::WaitUntil] won't do anything.
     pub fn run_immediate(&self, mut event_handler: impl FnMut(Event, &mut ControlFlow)) {
-        let mut awaiting_responses = self.awaiting_responses.borrow_mut();
-        let mut awaited_responses = self.awaited_responses.borrow_mut();
         loop {
             let response = match self.recv.try_recv() {
                 Ok(response) => response,
@@ -111,63 +159,77 @@ impl EventLoop {
                 Err(TryRecvError::Disconnected) => panic!("main event loop crashed")
             };
 
-            self.handle_response(response, &mut event_handler, &mut awaiting_responses, &mut awaited_responses);
+            match self.handle_response(response, &mut event_handler) {
+                std::ops::ControlFlow::Break(()) => break,
+                std::ops::ControlFlow::Continue(()) => ()
+            }
         }
-    }
-
-    /// Receives all pending events and responses from the main loop, blocking waiting for new responses,
-    /// until the event handler explicitly exits.
-    pub async fn run_async(&self, mut event_handler: impl FnMut(Event, &mut ControlFlow)) {
-        loop {
-            let response = match self.recv.recv_async().await {
-                Ok(response) => response,
-                Err(_) => panic!("main event loop crashed")
-            };
-
-            // We have to borrow inside the loop because we poll on every call to .await
-            let mut awaiting_responses = self.awaiting_responses.borrow_mut();
-            let mut awaited_responses = self.awaited_responses.borrow_mut();
-
-            self.handle_response(response, &mut event_handler, &mut awaiting_responses, &mut awaited_responses);
-        }
-    }
-
-    /// Receives all pending events and responses from the main loop, blocking waiting for new responeses,
-    /// until the event handler explicitly exits.
-    pub fn run(&self, event_handler: impl FnMut(Event, &mut ControlFlow)) {
-        block_on(self.run_async(event_handler))
     }
 
     fn handle_response(
         &self,
         response: ProxyResponse,
-        event_handler: &mut impl FnMut(Event, &mut ControlFlow),
-        awaiting_responses: &mut RefMut<'_, VecDeque<PendingResponse>>,
-        awaited_responses: &mut RefMut<'_, Vec<ReadyResponse>>
-    ) {
-        if let ProxyResponse::Event(event) = response {
-            let mut control_flow = self.control_flow.load();
-            event_handler(event, &mut control_flow);
-            self.control_flow.store(control_flow);
+        event_handler: impl FnMut(Event, &mut ControlFlow)
+    ) -> std::ops::ControlFlow<()> {
+        // Events are separate from "regular" responses.
+        // Events we just forward to the event handler,
+        // other responses are associated with requests which need them in order to be resolved.
+        // So the algorithm is:
+        // - If this is an event, forward to the event handler
+        // - Else there should be a pending request, resolve it
+        if self.is_receiving_events.get() {
+            if let ProxyResponse::Event(event) = response {
+                self.handle_event(event, event_handler)
+            } else if let Some(pending_request) = self.pending_requests.borrow_mut().pop_front() {
+                pending_request.resolve(response);
+                std::ops::ControlFlow::Continue(())
+            } else {
+                panic!("unhandled response with no associated request (is_receiving_events = true)");
+            }
         } else {
-            let awaiting_response = awaiting_responses.pop_front().expect("got response when we weren't awaiting one");
-            awaited_responses.push(awaiting_response.wake(response));
+            if let ProxyResponse::Event(event) = response {
+                self.locally_pending_events.borrow_mut().push(event);
+                std::ops::ControlFlow::Continue(())
+            } else if let Some(pending_request) = self.pending_requests.borrow_mut().pop_front() {
+                pending_request.resolve(response);
+                if self.pending_requests.borrow().is_empty() {
+                    // Only meant to receive responses, and we are done receiving them
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            } else {
+                panic!("unhandled response with no associated request (is_receiving_events = false)");
+            }
         }
     }
 
-    pub(crate) fn poll(&self, id: ResponseId, cx: &mut Context<'_>) -> Poll<ProxyResponse> {
-        for awaiting_response in self.awaiting_responses.borrow_mut().iter_mut() {
-            if awaiting_response.id == id {
-                awaiting_response.poll(cx);
-                return Poll::Pending;
-            }
+    fn handle_event(&self, event: Event, mut event_handler: impl FnMut(Event, &mut ControlFlow)) -> std::ops::ControlFlow<()> {
+        let mut control_flow = self.control_flow.load();
+        debug_assert_ne!(control_flow, ControlFlow::ExitLocal);
+        event_handler(event, &mut control_flow);
+        if control_flow == ControlFlow::ExitLocal {
+            std::ops::ControlFlow::Break(())
+        } else {
+            self.control_flow.store(control_flow);
+            std::ops::ControlFlow::Continue(())
         }
+    }
 
-        for awaited_response in self.awaited_responses.borrow_mut().drain_filter(|awaited_response| awaited_response.id == id) {
-            return Poll::Ready(awaited_response.response);
-        }
+    fn send<T>(&self, message: ProxyRequest, convert_response: fn(ProxyResponse) -> T) -> FutResponse<'_, T> {
+        FutResponse::new(self, message, convert_response)
+    }
 
-        panic!("unexpected response id: {}", id);
+    pub(crate) async fn actually_send(&self, message: ProxyRequest, waker: Waker, response_ptr: *mut Option<ProxyResponse>) {
+        match self.send.try_send(message) {
+            Ok(()) => (),
+            Err(TrySendError::Full(_)) => unreachable!("proxy event loop channel (unbounded) is full?"),
+            Err(TrySendError::Disconnected(_)) => panic!("main event loop crashed")
+        };
+
+        self.pending_requests.borrow_mut().push_back(PendingRequest::new(waker, response_ptr));
+
+        self.run_only_responses().await;
     }
 }
 

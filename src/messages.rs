@@ -7,13 +7,13 @@ use std::task::Waker;
 use crate::event::Event;
 use crate::event_loop::ControlFlow;
 
-pub enum ProxyRequest {
+pub(crate) enum ProxyRequest {
     SpawnWindow {
         configure: Box<dyn FnOnce(WindowBuilder) -> WindowBuilder + Send>
     }
 }
 
-pub enum ProxyResponse {
+pub(crate) enum ProxyResponse {
     SpawnWindow(Result<Window, OsError>),
     Event(Event)
 }
