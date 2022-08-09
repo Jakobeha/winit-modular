@@ -1,3 +1,4 @@
+use std::any::Any;
 use winit::window::{Window, WindowBuilder};
 use winit::error::OsError;
 use flume::{Receiver, Sender};
@@ -10,11 +11,15 @@ use crate::event_loop::ControlFlow;
 pub(crate) enum ProxyRequest {
     SpawnWindow {
         configure: Box<dyn FnOnce(WindowBuilder) -> WindowBuilder + Send>
+    },
+    RunOnMainThread {
+        action: Box<dyn FnOnce() -> Box<dyn Any> + Send>
     }
 }
 
 pub(crate) enum ProxyResponse {
-    SpawnWindow(Result<Window, OsError>),
+    SpawnWindow { result: Result<Window, OsError> },
+    RunOnMainThread { return_value: Box<dyn Any> },
     Event(Event)
 }
 

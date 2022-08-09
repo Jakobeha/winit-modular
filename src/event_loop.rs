@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::cmp::Ordering;
 use std::sync::Arc;
 use crossbeam_utils::atomic::AtomicCell;
@@ -71,13 +72,34 @@ impl EventLoop {
         }
     }
 
+    /// Runs an arbitrary closure on the main / UI thread.
+    ///
+    /// Note that the closure must be `'static`, which means it can't reference local variables.
+    /// To get around this, you can convert them to raw pointers, wrap them in an `unsafe Send` struct,
+    /// and `unsafe` dereference them inside the closure. This should actually be 100% safe as long
+    /// as you `await` and do not drop the `Future`, as those references will remain alive and won't
+    /// be dereferenced outside of the closure until the future ends.
+    /// Alternatively, to get around this without `unsafe`, you can `move` the local variables into
+    /// the closure and then return them along with your "real" result.
+    pub fn on_main_thread<R: Any + Send>(&self, action: impl FnOnce() -> R + Send + 'static) -> FutResponse<'_, R> {
+        self.send(ProxyRequest::RunOnMainThread {
+            action: Box::new(move || Box::new(action()))
+        }, |response| {
+            match response {
+                ProxyResponse::RunOnMainThread { return_value } => {
+                    Box::into_inner(return_value.downcast::<R>().expect("incorrect return value type, responses were received out-of-order"))
+                }
+                _ => panic!("incorrect response type, responses were received out-of-order")
+            }
+        })
+    }
     /// Creates a new [Window], using the function to add arguments
     pub fn create_window(&self, configure: impl FnOnce(WindowBuilder) -> WindowBuilder + Send + 'static) -> FutResponse<'_, Result<Window, OsError>> {
         self.send(ProxyRequest::SpawnWindow {
             configure: Box::new(configure)
         }, |response| {
             match response {
-                ProxyResponse::SpawnWindow(window) => window,
+                ProxyResponse::SpawnWindow { result } => result,
                 _ => panic!("incorrect response type, responses were received out-of-order")
             }
         })

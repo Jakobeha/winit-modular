@@ -80,7 +80,10 @@ pub fn run(rest: impl FnOnce() + Send + 'static) -> ! {
 
                 let response = match request {
                     ProxyRequest::SpawnWindow { configure } => {
-                        ProxyResponse::SpawnWindow(configure(WindowBuilder::new()).build(&window_target))
+                        ProxyResponse::SpawnWindow { result: configure(WindowBuilder::new()).build(&window_target) }
+                    }
+                    ProxyRequest::RunOnMainThread { action } => {
+                        ProxyResponse::RunOnMainThread { return_value: action() }
                     }
                 };
 
