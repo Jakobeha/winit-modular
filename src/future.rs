@@ -1,6 +1,7 @@
 use std::task::{Context, Poll, Waker};
 use std::future::Future;
 use std::marker::PhantomPinned;
+use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::sync::Arc;
 use crossbeam_utils::atomic::AtomicCell;
@@ -13,10 +14,19 @@ pub struct FutEventLoop {
 
 #[must_use = "the response won't actually send until you await or poll"]
 #[repr(C)]
-pub struct FutResponse<'a, T> {
+pub struct FutResponse<'a, T>(
+    // actually_send passes a reference to this, we want to keep it alive until that reference is set and this is polled again.
+    ManuallyDrop<_FutResponse<'a, T>>
+);
+
+
+#[must_use = "the response won't actually send until you await or poll"]
+#[repr(C)]
+pub struct _FutResponse<'a, T> {
     response: Option<ProxyResponse>,
-    proxy: &'a EventLoop,
+    held_future: Option<Box<dyn Future<Output=()> + 'a>>,
     message: Option<ProxyRequest>,
+    proxy: &'a EventLoop,
     convert: fn(ProxyResponse) -> T,
     // This is pinned because there is a pointer to response in PendingRequest
     _p: PhantomPinned
@@ -48,13 +58,21 @@ impl<'a, T> FutResponse<'a, T> {
         message: ProxyRequest,
         convert: fn(ProxyResponse) -> T
     ) -> Self {
-        FutResponse {
+        FutResponse(ManuallyDrop::new(_FutResponse {
             response: None,
-            proxy,
+            held_future: None,
             message: Some(message),
+            proxy,
             convert,
             _p: PhantomPinned
-        }
+        }))
+    }
+
+    fn finalize(&mut self, response: ProxyResponse) -> Poll<T> {
+        let convert = self.0.convert;
+        // SAFETY: Once we return we no longer need this
+        unsafe { ManuallyDrop::drop(&mut self.0) };
+        Poll::Ready(convert(response))
     }
 }
 
@@ -63,16 +81,24 @@ impl<'a, T> Future for FutResponse<'a, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY
-        let this = unsafe { self.get_unchecked_mut() };
+        let this_wrapper = unsafe { self.get_unchecked_mut() };
+        let this = &mut *this_wrapper.0;
         if let Some(response) = this.response.take() {
             debug_assert!(this.message.is_none());
-            Poll::Ready((this.convert)(response))
+            this_wrapper.finalize(response)
         } else {
-            let message = this.message.take().expect("redundantly polled");
-            match Pin::new(&mut Box::pin(this.proxy.actually_send(message, cx.waker().clone(), &mut this.response as *mut _))).poll(cx) {
+            if let Some(message) = this.message.take() {
+                debug_assert!(this.held_future.is_none());
+                this.held_future = Some(Box::new(this.proxy.actually_send(message, cx.waker().clone(), &mut this.response as *mut _)));
+            } else {
+                debug_assert!(this.held_future.is_some());
+            }
+            // SAFETY: in a Pin
+            let held_future = unsafe { Pin::new_unchecked(this.held_future.as_mut().unwrap().as_mut()) };
+            match held_future.poll(cx) {
                 Poll::Ready(()) => {
                     let response = this.response.take().expect("FutResponse poll instantly succeeded but there is no response");
-                    Poll::Ready((this.convert)(response))
+                    this_wrapper.finalize(response)
                 }
                 Poll::Pending => Poll::Pending
             }

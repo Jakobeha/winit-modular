@@ -187,12 +187,13 @@ impl EventLoop {
                 panic!("unhandled response with no associated request (is_receiving_events = true)");
             }
         } else {
+            let mut pending_requests = self.pending_requests.borrow_mut();
             if let ProxyResponse::Event(event) = response {
                 self.locally_pending_events.borrow_mut().push(event);
                 std::ops::ControlFlow::Continue(())
-            } else if let Some(pending_request) = self.pending_requests.borrow_mut().pop_front() {
+            } else if let Some(pending_request) = pending_requests.pop_front() {
                 pending_request.resolve(response);
-                if self.pending_requests.borrow().is_empty() {
+                if pending_requests.is_empty() {
                     // Only meant to receive responses, and we are done receiving them
                     std::ops::ControlFlow::Break(())
                 } else {
