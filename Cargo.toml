@@ -2,7 +2,7 @@
 name = "winit-modular"
 version = "0.1.0"
 authors = ["jakobeha <jakobeha@fastmail.com>"]
-description = "use `winit` without relying on a single `EventLoop` on the main thread"
+description = "proxy `winit` event loops which can be run at the same time, on separate threads"
 repository = "https://github.com/jakobeha/winit-modular"
 license = "Apache-2.0"
 keywords = ["windowing"]

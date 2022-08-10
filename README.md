@@ -1,6 +1,12 @@
-# winit-modular: use `winit` without relying on a single `EventLoop` on the main thread
+# winit-modular: proxy `winit` event loops which can be run at the same time, on separate threads
+
+[![](https://docs.rs/winit-modular/badge.svg)](https://docs.rs/winit-modular/)
+[![](https://img.shields.io/crates/v/winit-modular.svg)](https://crates.io/crates/winit-modular)
+[![](https://img.shields.io/crates/d/winit-modular.svg)](https://crates.io/crates/winit-modular)
 
 Provides an API very similar to `winit` except the `EventLoop` type can be created on multiple threads, multiple event loops can exist simultaneously, you can poll for events or receive them asynchronously, and more.
+
+**Notice:** This library is still very early in development, and certain features are not fully tested. If you encounter any issues, please submit an issue or PR on [github](https://github.com/Jakobeha/winit-modular).
 
 ## The problem
 
