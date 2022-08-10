@@ -8,10 +8,12 @@ use crossbeam_utils::atomic::AtomicCell;
 use crate::event_loop::EventLoop;
 use crate::messages::{ProxyRegisterBody, ProxyRequest, ProxyResponse};
 
+/// Future [EventLoop]
 pub struct FutEventLoop {
     pub(crate) body: Arc<AtomicCell<ProxyRegisterBody>>
 }
 
+/// Future `T` which we get by an RPC from a proxy [EventLoop] to the main thread.
 #[must_use = "the response won't actually send until you await or poll"]
 #[repr(C)]
 pub struct FutResponse<'a, T>(
@@ -22,7 +24,7 @@ pub struct FutResponse<'a, T>(
 
 #[must_use = "the response won't actually send until you await or poll"]
 #[repr(C)]
-pub struct _FutResponse<'a, T> {
+struct _FutResponse<'a, T> {
     response: Option<ProxyResponse>,
     held_future: Option<Box<dyn Future<Output=()> + 'a>>,
     message: Option<ProxyRequest>,

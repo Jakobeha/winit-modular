@@ -19,7 +19,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{AxisId, DeviceEvent, DeviceId, ElementState, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, StartCause, Touch, TouchPhase};
 use winit::window::{Theme, WindowId};
 
-/// Event which gets sent to [ProxyEventLoop]s.
+/// Event which gets sent to proxy [EventLoop]s. See [winit::event::Event] for details.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// Emitted when new events arrive from the OS to be processed.
@@ -93,7 +93,7 @@ pub enum Event {
     LoopDestroyed,
 }
 
-/// Describes an event from a `Window`.
+/// Describes an event from a [winit::window::Window]. See [winit::event::WindowEvent] for details.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     /// The size of the window has changed. Contains the client area's new dimensions.
@@ -241,7 +241,10 @@ pub enum WindowEvent {
     ThemeChanged(Theme),
 }
 
+/// Allows you to set the inner size in a `WindowEvent::ScaleFactorChanged` event,
+/// but it doesn't actually work yet.
 #[derive(Debug, Clone)]
+#[doc(hidden)]
 pub struct NewInnerSize(Arc<Mutex<PhysicalSize<u32>>>);
 
 impl Deref for NewInnerSize {
@@ -259,7 +262,9 @@ impl PartialEq for NewInnerSize {
     }
 }
 
-/// A generic custom event which should support most use cases
+/// A generic custom event which should support most use cases.
+///
+/// Since there is no shared event loop and anyone can create a proxy, the type of user events is dynamic.
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Primitive(usize),
@@ -267,6 +272,7 @@ pub enum UserEvent {
 }
 
 /// Traits which custom events must implement.
+///
 /// Custom events must support testing for equality because [Event] is.
 /// If you don't need this you can create a dummy implementation which always returns `false`.
 /// They must implement cloning and [Send] because they will get cloned and sent to each proxy.

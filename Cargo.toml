@@ -1,6 +1,6 @@
 [package]
 name = "winit-modular"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["jakobeha <jakobeha@fastmail.com>"]
 description = "proxy `winit` event loops which can be run at the same time, on separate threads"
 repository = "https://github.com/jakobeha/winit-modular"

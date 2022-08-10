@@ -4,9 +4,10 @@
 
 /// Proxy event loops and control flow type.
 pub mod event_loop;
-/// Events received by the proxy event loops
+/// Events received by the proxy event loops.
 pub mod event;
 /// Futures, since most of the operations are across threads.
+#[doc(hidden)]
 pub mod future;
 /// Messages sent between the proxy event loops and shared event loop.
 mod messages;

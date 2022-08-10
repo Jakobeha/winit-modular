@@ -14,7 +14,9 @@ use crate::event::Event;
 use crate::future::{FutResponse, PendingRequest, FutEventLoop};
 use crate::messages::{ProxyRegister, ProxyRegisterBody, ProxyRegisterInfo, ProxyRequest, ProxyResponse, REGISTER_PROXY};
 
-/// Similar API to [winit::EventLoop], however
+/// A proxy event loop.
+///
+/// Similar API to [winit::event_loop::EventLoop], except:
 ///
 /// - You can create multiples of these and even run them at the same time, on separate threads
 /// - You can create these on separate threads
@@ -33,13 +35,17 @@ pub struct EventLoop {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+/// Whether an event is during or before the call to [EventLoop::run] or [EventLoop::run_async]
 pub enum EventIs {
-    Pending,
+    /// Event was before the call to `run...`
+    Buffered,
+    /// Event was during the call to `run...`
     New
 }
 
 impl EventLoop {
-    /// Creates a new [EventLoop]. However it must first be registered, so this returns a [Future].
+    /// Creates a new proxy event loop. However it must first be registered, so this is async.
     pub fn new() -> FutEventLoop {
         let register_handle = Arc::new(AtomicCell::new(ProxyRegisterBody::Init));
 
@@ -75,12 +81,16 @@ impl EventLoop {
     /// Runs an arbitrary closure on the main / UI thread.
     ///
     /// Note that the closure must be `'static`, which means it can't reference local variables.
+    ///
     /// To get around this, you can convert them to raw pointers, wrap them in an `unsafe Send` struct,
     /// and `unsafe` dereference them inside the closure. This should actually be 100% safe as long
     /// as you `await` and do not drop the `Future`, as those references will remain alive and won't
     /// be dereferenced outside of the closure until the future ends.
+    ///
     /// Alternatively, to get around this without `unsafe`, you can `move` the local variables into
     /// the closure and then return them along with your "real" result.
+    ///
+    /// In the future, we may provide more methods to work around this limitation.
     pub fn on_main_thread<R: Any + Send>(&self, action: impl FnOnce() -> R + Send + 'static) -> FutResponse<'_, R> {
         self.send(ProxyRequest::RunOnMainThread {
             action: Box::new(move || Box::new(action()))
@@ -151,7 +161,7 @@ impl EventLoop {
     async fn _run_async(&self, mut event_handler: impl FnMut(Event, &mut ControlFlow, EventIs)) {
         // Handle pending events
         self.run_immediate(|event, control_flow| {
-            event_handler(event, control_flow, EventIs::Pending);
+            event_handler(event, control_flow, EventIs::Buffered);
         });
 
         // Handle new events
@@ -256,6 +266,8 @@ impl EventLoop {
     }
 }
 
+/// [winit::event_loop::ControlFlow] for a proxy event loop.
+///
 /// Copied from [winit/event_loop](https://docs.rs/winit/0.26.1/src/winit/event_loop.rs.html) and modified.
 /// See [winit::event_loop::ControlFlow docs](https://docs.rs/winit/0.26.1/winit/event_loop/enum.ControlFlow.html) for details.
 ///
