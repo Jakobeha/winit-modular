@@ -1,6 +1,6 @@
 [package]
 name = "winit-modular"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["jakobeha <jakobeha@fastmail.com>"]
 description = "proxy `winit` event loops which can be run at the same time, on separate threads"
 repository = "https://github.com/jakobeha/winit-modular"
@@ -20,6 +20,8 @@ crossbeam-utils = "0.8.11"
 futures = "0.3.21"
 
 [dev-dependencies]
+# Async -> sync
+pollster = "0.2.5"
 # Logging
 test-log = "0.2.11"
 env_logger = "0.9.0"

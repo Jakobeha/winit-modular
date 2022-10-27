@@ -1,6 +1,4 @@
 #![doc = include_str!("../README.md")]
-#![feature(drain_filter)]
-#![feature(box_into_inner)]
 
 /// Proxy event loops and control flow type.
 pub mod event_loop;

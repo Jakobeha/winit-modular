@@ -97,7 +97,7 @@ impl EventLoop {
         }, |response| {
             match response {
                 ProxyResponse::RunOnMainThread { return_value } => {
-                    Box::into_inner(return_value.downcast::<R>().expect("incorrect return value type, responses were received out-of-order"))
+                    *return_value.downcast::<R>().expect("incorrect return value type, responses were received out-of-order")
                 }
                 _ => panic!("incorrect response type, responses were received out-of-order")
             }

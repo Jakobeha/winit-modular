@@ -92,7 +92,7 @@ fn main() {
             .await
             .unwrap();
 
-        event_loop.run_async(|event, control_flow| {
+        event_loop.run_async(|event, control_flow, _| {
             if matches!(
                 event,
                 Event::WindowEvent {
